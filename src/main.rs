@@ -88,6 +88,7 @@ fn main() {
                     } else {
                         WindowLevel::Normal
                     },
+                    composite_alpha_mode: bevy::window::CompositeAlphaMode::PreMultiplied,
                     #[cfg(target_os = "macos")]
                     composite_alpha_mode: bevy::window::CompositeAlphaMode::PostMultiplied,
                     #[cfg(target_os = "linux")]
