@@ -1,4 +1,4 @@
-name: Release scrcpy-mask
+name: Release scrcpy-mask windows
 
 on:
   push:
