@@ -1,0 +1,158 @@
+name: Release scrcpy-mask
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-frontend:
+    name: Build Frontend
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout codes
+        uses: actions/checkout@v5.0.0
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4.1.0
+        with:
+          version: latest
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          cache: 'pnpm'
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - name: Build frontend
+        shell: bash
+        run: |
+          cd frontend
+          pnpm install
+          pnpm build
+      - name: Upload frontend build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-web-assets
+          path: assets/web
+
+  windows:
+    runs-on: ${{ matrix.os }}
+    needs: build-frontend
+    strategy:
+      matrix:
+        os: [windows-latest]
+        include:
+          - os: windows-latest
+            platform: windows-x64
+            
+    steps:
+      - name: Checkout codes
+        uses: actions/checkout@v5.0.0
+
+      - name: Download frontend build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-web-assets
+          path: assets/web
+
+      - name: Set up msvc
+        uses: ilammy/msvc-dev-cmd@v1
+      - name: Set up msys
+        uses: msys2/setup-msys2@v2
+        with:
+          update: true
+          msystem: MINGW64
+          install: >-
+            make
+            diffutils
+            yasm
+            pkg-config
+          path-type: inherit
+
+      - name: Cache FFmpeg build
+        id: ffmpeg-cache
+        uses: actions/cache@v4
+        with:
+          path: ffmpeg-7.1.2/ffmpeg-${{ matrix.platform }}
+          key: ffmpeg-${{ matrix.platform }}-7.1.2-v0.4
+
+      - name: Download and build FFmpeg (if not cached)
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        shell: msys2 {0}
+        run: |
+          OS=${{ matrix.platform }}
+          
+          curl -L -o FFmpeg-n7.1.2.tar.gz https://github.com/FFmpeg/FFmpeg/archive/refs/tags/n7.1.2.tar.gz
+          tar -xzf FFmpeg-n7.1.2.tar.gz
+          rm FFmpeg-n7.1.2.tar.gz
+          mv FFmpeg-n7.1.2 ffmpeg-7.1.2
+          cd ffmpeg-7.1.2
+
+          ./configure --prefix=./ffmpeg-$OS \
+              --disable-all --disable-doc --disable-iconv \
+              --toolchain=msvc \
+              --enable-decoder=h264 --enable-decoder=hevc --enable-decoder=av1 \
+              --enable-swscale --enable-avformat --enable-avcodec --enable-avutil --enable-swresample \
+              --enable-gpl --enable-static --disable-shared
+
+          make -j$(nproc)
+          make install
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.platform }}
+
+      - name: Build scrcpy-mask
+        shell: pwsh
+        run: |
+          $ScriptDir = "${{ github.workspace }}"
+          $OS = "${{ matrix.platform }}"
+          $Prefix = "ffmpeg-$OS"
+          $ProjectName = "scrcpy-mask"
+          $FFMpeg = "ffmpeg-7.1.2"
+          
+          $env:PKG_CONFIG_PATH = "$ScriptDir\$FFMpeg\$Prefix\lib\pkgconfig"
+          $env:FFMPEG_DIR = "$ScriptDir\$FFMpeg\$Prefix"
+
+          cargo build --release
+
+          $OutputZip = "$ScriptDir\$ProjectName-$OS.zip"
+          $BuildTarget = "$ScriptDir\target\release\$ProjectName.exe"
+          $AssetsDir = "$ScriptDir\assets"
+          
+          Write-Host "Build successful, creating zip package..."
+          $OutputZip = "$ScriptDir\target\release\$ProjectName-$OS.zip"
+          $BuildTarget = "$ScriptDir\target\release\$ProjectName.exe"
+          $AssetsDir = "$ScriptDir\assets"
+          
+          $PathsToCompress = @($BuildTarget, $AssetsDir)
+          Compress-Archive -Path $PathsToCompress -DestinationPath $OutputZip -Force
+
+          "OUTPUT_ZIP=$OutputZip"   | Out-File -FilePath $env:GITHUB_ENV -Append
+          "OUTPUT_NAME=$($ProjectName)-$OS" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          path: ${{ env.OUTPUT_ZIP }}
+          name: ${{ env.OUTPUT_NAME }}
+
+
+  
+  release:
+    needs: [windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v5
+      - name: List downloaded files
+        run: ls -R
+  
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: |
+            scrcpy-mask-windows-x64/**
